@@ -21,7 +21,7 @@ from airflow.decorators import dag, task
 
 log = logging.getLogger(__name__)
 
-_LIMIT: int | None = 1_000   # None = run complet de production
+_LIMIT: int | None = None   # production — toutes les entreprises
 
 
 @dag(

@@ -19,6 +19,10 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD: '7200'
+    AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL: '120'
+    AIRFLOW__CORE__PARALLELISM: '4'              # max 4 tasks simultanées (laptop)
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '4' # max 4 tasks par DAG
     PYTHONPATH: /opt/airflow
     # ── Connexions pipeline ──────────────────────────────────────────────────
     MONGO_URI:           mongodb://mongo:27017/
@@ -131,6 +135,23 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── Mongo Express — UI web pour visualiser les deux MongoDB ─────────────────
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: mongo_express
+    restart: always
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongo
+      ME_CONFIG_MONGODB_PORT: "27017"
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin
+    networks:
+      - bce_network
+    depends_on:
+      - mongo
+
   # ── MongoDB — State DB (instance isolée) ──────────────────────────────────
   mongo_state:
     image: mongo:7.0
@@ -181,6 +202,42 @@ services:
     ports:
       - "9054:9050"
       - "9055:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - bce_network
+
+  tor4:
+    image: dperson/torproxy
+    container_name: tor4
+    restart: unless-stopped
+    ports:
+      - "9056:9050"
+      - "9057:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - bce_network
+
+  tor5:
+    image: dperson/torproxy
+    container_name: tor5
+    restart: unless-stopped
+    ports:
+      - "9058:9050"
+      - "9059:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - bce_network
+
+  tor6:
+    image: dperson/torproxy
+    container_name: tor6
+    restart: unless-stopped
+    ports:
+      - "9060:9050"
+      - "9061:9051"
     environment:
       - CONTROL_PASSWORD=mypass
     networks:

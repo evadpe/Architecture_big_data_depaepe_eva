@@ -157,7 +157,11 @@ def download_pdf(deposit_id: str, session: _Session | None = None) -> bytes | No
     if not r.ok:
         log.warning("[nbb] download_pdf [%s] HTTP %s", deposit_id, r.status_code)
         return None
-    if "pdf" not in r.headers.get("content-type", "").lower() or len(r.content) < 1_000:
+    # NBB retourne application/octet-stream (pas application/pdf) — on vérifie
+    # uniquement la taille pour rejeter les pages d'erreur HTML/JSON (<1KB).
+    if len(r.content) < 1_000:
+        log.debug("[nbb] download_pdf [%s] → contenu trop court (%d o), ignoré", deposit_id, len(r.content))
         return None
-    log.debug("[nbb] download_pdf [%s] → %d o", deposit_id, len(r.content))
+    log.debug("[nbb] download_pdf [%s] → %d o (ct=%s)", deposit_id, len(r.content),
+              r.headers.get("content-type", "?"))
     return r.content

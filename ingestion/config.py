@@ -44,6 +44,9 @@ TOR_PROXIES = [
     {"socks": "socks5h://tor1:9050", "control_host": "tor1", "control_port": 9051},
     {"socks": "socks5h://tor2:9050", "control_host": "tor2", "control_port": 9051},
     {"socks": "socks5h://tor3:9050", "control_host": "tor3", "control_port": 9051},
+    {"socks": "socks5h://tor4:9050", "control_host": "tor4", "control_port": 9051},
+    {"socks": "socks5h://tor5:9050", "control_host": "tor5", "control_port": 9051},
+    {"socks": "socks5h://tor6:9050", "control_host": "tor6", "control_port": 9051},
 ]
 TOR_CONTROL_PASSWORD = os.getenv("TOR_CONTROL_PASSWORD", "mypass")
 TOR_NEWNYM_WAIT      = 10    # secondes d'attente après SIGNAL NEWNYM
@@ -53,17 +56,24 @@ TOR_BACKOFF_BASE     = 5    # secondes de base entre deux retries
 # ── NBB / CBSO ────────────────────────────────────────────────────────────────
 CBSO_API         = "https://consult.cbso.nbb.be/api"
 CBSO_PAGE_SIZE   = 50
-CBSO_DELAY       = 2.0   # 2s entre requêtes — évite le rate limit NBB (0.5s le déclenchait)
+CBSO_DELAY       = 0.8   # 0.8s entre requêtes — équilibre vitesse / rate limit avec rotation Tor
 CBSO_TIMEOUT_CSV = 60
 CBSO_TIMEOUT_PDF = 90
 
-# PDFs accessibles publiquement — le notebook les a téléchargés sans auth.
-# Le 403 actuel = rate limit temporaire (trop de requêtes en rafale), pas un blocage permanent.
-ENABLE_NBB_PDF   = True
+# PDFs accessibles publiquement MAIS l'endpoint /deposits/pdf/ bloque les Tor exit nodes.
+# → CSVs via Tor (anti-429), PDFs via connexion directe (Origin/Referer suffisent).
+ENABLE_NBB_PDF     = True
+PDF_USE_TOR        = False   # False = connexion directe pour les PDFs
 
 NBB_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; BCE-pipeline/1.0; research)",
-    "Accept":     "application/json, */*",
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "fr-BE,fr;q=0.9,en;q=0.8",
+    "Origin":          "https://consult.cbso.nbb.be",
+    "Referer":         "https://consult.cbso.nbb.be/",
+    "sec-fetch-dest":  "empty",
+    "sec-fetch-mode":  "cors",
+    "sec-fetch-site":  "same-origin",
 }
 
 # ── eJustice ──────────────────────────────────────────────────────────────────
