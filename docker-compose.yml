@@ -1,0 +1,262 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline BCE Big Data
+#   • HDFS        : namenode + datanode  (Hadoop 3.2)
+#   • mongo       : données structurées KBO + comptes NBB + métadonnées
+#   • mongo_state : State DB isolée (download_state uniquement)
+#   • tor1-3      : pool de proxies SOCKS5 (rotation anti-429)
+#   • PostgreSQL  : backend Airflow
+#   • Airflow     : scheduler + webserver (LocalExecutor)
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.3
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    PYTHONPATH: /opt/airflow
+    # ── Connexions pipeline ──────────────────────────────────────────────────
+    MONGO_URI:           mongodb://mongo:27017/
+    MONGO_DB:            bce_db
+    MONGO_STATE_URI:     mongodb://mongo_state:27017/
+    MONGO_STATE_DB:      bce_state_db
+    HDFS_URL:            http://namenode:9870
+    HDFS_USER:           root
+    KBO_DATA_DIR:        /opt/airflow/données
+    STRAPOR_COOKIE_FILE: /opt/airflow/notaire_cookies.json
+    TOR_CONTROL_PASSWORD: mypass
+    # ── Packages supplémentaires ──────────────────────────────────────────────
+    _PIP_ADDITIONAL_REQUIREMENTS: >-
+      pymongo==4.7.3
+      requests==2.32.3
+      pandas==2.2.2
+      PySocks==1.7.1
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./ingestion:/opt/airflow/ingestion
+    - ./données:/opt/airflow/données:ro
+    - ./logs:/opt/airflow/logs
+    - ./notaire_cookies.json:/opt/airflow/notaire_cookies.json
+  networks:
+    - bce_network
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mongo:
+      condition: service_healthy
+    mongo_state:
+      condition: service_healthy
+    namenode:
+      condition: service_healthy
+
+services:
+
+  # ── HDFS ──────────────────────────────────────────────────────────────────
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs_namenode
+    hostname: namenode
+    restart: always
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    environment:
+      - CLUSTER_NAME=bce_cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_client_use_datanode_hostname=true
+      - HDFS_CONF_dfs_datanode_use_datanode_hostname=true
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks:
+      - bce_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs_datanode
+    hostname: datanode
+    restart: always
+    ports:
+      - "9864:9864"
+      - "9866:9866"
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_client_use_datanode_hostname=false
+      - HDFS_CONF_dfs_datanode_use_datanode_hostname=false
+      - HDFS_CONF_dfs_datanode_address=0.0.0.0:9866
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9864
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    networks:
+      - bce_network
+    depends_on:
+      - namenode
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9864/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── MongoDB — données structurées ─────────────────────────────────────────
+  mongo:
+    image: mongo:7.0
+    container_name: bce_mongo
+    hostname: mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - bce_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── MongoDB — State DB (instance isolée) ──────────────────────────────────
+  mongo_state:
+    image: mongo:7.0
+    container_name: bce_mongo_state
+    hostname: mongo_state
+    restart: always
+    ports:
+      - "27018:27017"       # port hôte différent pour accès direct si besoin
+    volumes:
+      - mongo_state_data:/data/db
+    networks:
+      - bce_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── Tor proxies (pool anti-429) ───────────────────────────────────────────
+  tor1:
+    image: dperson/torproxy
+    container_name: tor1
+    restart: unless-stopped
+    ports:
+      - "9050:9050"
+      - "9051:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - bce_network
+
+  tor2:
+    image: dperson/torproxy
+    container_name: tor2
+    restart: unless-stopped
+    ports:
+      - "9052:9050"
+      - "9053:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - bce_network
+
+  tor3:
+    image: dperson/torproxy
+    container_name: tor3
+    restart: unless-stopped
+    ports:
+      - "9054:9050"
+      - "9055:9051"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - bce_network
+
+  # ── PostgreSQL (Airflow metadata) ──────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: airflow_postgres
+    hostname: postgres
+    restart: always
+    environment:
+      POSTGRES_USER:     airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB:       airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bce_network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Airflow init ───────────────────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin --firstname Admin --lastname BCE \
+          --role Admin --email admin@bce.local --password admin
+        echo "Airflow initialisé."
+    restart: "no"
+
+  # ── Airflow scheduler ──────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Airflow webserver ──────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-scheduler:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  namenode_data:
+  datanode_data:
+  mongo_data:
+  mongo_state_data:
+  postgres_data:
+
+networks:
+  bce_network:
+    driver: bridge

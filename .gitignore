@@ -1,0 +1,20 @@
+# Bloquer tous les fichiers de logs
+*.log
+logs/
+*.err
+*.out
+
+notaire_cookies.json
+# Bloquer tous les fichiers CSV
+*.csv
+données/
+
+# Bloquer l'environnement virtuel Python (au cas où)
+.venv/
+
+
+
+# Bloquer les fichiers système ou caches
+__pycache__/
+*.pyc
+.DS_Store
