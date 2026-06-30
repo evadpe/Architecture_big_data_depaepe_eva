@@ -51,137 +51,72 @@ def dag_silver_kbo():
 
     @task
     def ensure_indexes() -> None:
-        """Index sur enterprises_full pour les requêtes fréquentes."""
+        """Index sur les collections source (lookup) et enterprises_full (requêtes)."""
         from ingestion.mongo_client import get_db
         from pymongo import ASCENDING, TEXT
-        col = get_db()["enterprises_full"]
+        db = get_db()
+
+        # ── Index de lookup sur les collections source ─────────────────────────
+        # Sans ces index, 7 full-scans × 1.95M entreprises = plusieurs jours
+        db["kbo_denominations"].create_index([("entity_number", ASCENDING)], background=True)
+        db["kbo_addresses"].create_index([("entity_number", ASCENDING)], background=True)
+        db["kbo_activities"].create_index([("entity_number", ASCENDING)], background=True)
+        db["kbo_contacts"].create_index([("entity_number", ASCENDING)], background=True)
+        db["kbo_establishments"].create_index([("enterprise_number", ASCENDING)], background=True)
+        log.info("Index collections source OK")
+
+        # ── Index de requête sur enterprises_full ─────────────────────────────
+        col = db["enterprises_full"]
         col.create_index([("Status", ASCENDING)], background=True)
         col.create_index([("JuridicalForm", ASCENDING)], background=True)
         col.create_index([("name", TEXT)], background=True, name="idx_name_text")
         col.create_index([("activities.nace_code", ASCENDING)], background=True)
-        col.create_index([("nbb_accounts.year", ASCENDING)], background=True)
         log.info("Index enterprises_full OK")
 
     @task(execution_timeout=None)
     def denormalize(n: None) -> dict:
         """
-        Pour chaque entreprise : agrège toutes les collections liées
-        et écrit le document dans enterprises_full (upsert).
+        Join côté serveur via $lookup + $out — aucun aller-retour Python.
+        MongoDB fait tout en une passe en utilisant les index sur entity_number.
         """
         from ingestion.mongo_client import get_db
-        from ingestion.config import BATCH_LOG_EVERY
-        from pymongo import UpdateOne
-        from pymongo.errors import BulkWriteError
 
-        db    = get_db()
-        src   = db["kbo_enterprises"]
-        dst   = db["enterprises_full"]
-        limit = _LIMIT
+        db = get_db()
+        t0 = time.time()
+        total = db["kbo_enterprises"].count_documents({})
+        log.info("=== dag_05 denormalize — %d entreprises (pipeline $lookup) ===", total)
 
-        total   = src.count_documents({})
-        log.info("=== dag_05 denormalize — %d entreprises (limit=%s) ===", total, limit)
-        t0      = time.time()
-        done    = 0
-        errors  = 0
-        batch   = []
-        BATCH_SIZE = 200
+        pipeline = [
+            {"$lookup": {
+                "from": "kbo_denominations", "localField": "_id",
+                "foreignField": "entity_number", "as": "denominations",
+            }},
+            {"$lookup": {
+                "from": "kbo_addresses", "localField": "_id",
+                "foreignField": "entity_number", "as": "addresses",
+            }},
+            {"$lookup": {
+                "from": "kbo_activities", "localField": "_id",
+                "foreignField": "entity_number", "as": "activities",
+            }},
+            {"$lookup": {
+                "from": "kbo_contacts", "localField": "_id",
+                "foreignField": "entity_number", "as": "contacts",
+            }},
+            {"$lookup": {
+                "from": "kbo_establishments", "localField": "_id",
+                "foreignField": "enterprise_number", "as": "establishments",
+            }},
+            {"$addFields": {"enriched_at": "$$NOW"}},
+            {"$out": "enterprises_full"},
+        ]
 
-        cursor = src.find({}, batch_size=500)
-        if limit:
-            cursor = cursor.limit(limit)
+        db["kbo_enterprises"].aggregate(pipeline, allowDiskUse=True)
 
-        for ent in cursor:
-            bce = ent["_id"]
-
-            try:
-                doc = {
-                    "_id":            bce,
-                    "bce_num":        ent.get("bce_num", bce),
-                    "bce_num_clean":  ent.get("bce_num_clean", bce.replace(".", "")),
-                    "name":           ent.get("name", ""),
-                    "Status":         ent.get("Status", ""),
-                    "JuridicalSituation": ent.get("JuridicalSituation", ""),
-                    "TypeOfEnterprise":   ent.get("TypeOfEnterprise", ""),
-                    "JuridicalForm":      ent.get("JuridicalForm", ""),
-                    "StartDate":          ent.get("StartDate", ""),
-                    "snapshot_date":      ent.get("snapshot_date", ""),
-
-                    # ── Collections liées ─────────────────────────────────────
-                    "denominations": list(db["kbo_denominations"].find(
-                        {"entity_number": bce},
-                        {"_id": 0, "entity_number": 0},
-                    )),
-                    "addresses": list(db["kbo_addresses"].find(
-                        {"entity_number": bce},
-                        {"_id": 0, "entity_number": 0},
-                    )),
-                    "activities": list(db["kbo_activities"].find(
-                        {"entity_number": bce},
-                        {"_id": 0, "entity_number": 0},
-                    )),
-                    "contacts": list(db["kbo_contacts"].find(
-                        {"entity_number": bce},
-                        {"_id": 0, "entity_number": 0},
-                    )),
-                    "establishments": list(db["kbo_establishments"].find(
-                        {"enterprise_number": bce},
-                        {"_id": 0, "enterprise_number": 0},
-                    )),
-
-                    # ── Données financières ───────────────────────────────────
-                    "nbb_accounts": list(db["nbb_accounts"].find(
-                        {"bce_num": bce},
-                        {"_id": 0, "bce_num": 0},
-                    )),
-                    "strapor": list(db["strapor_statutes"].find(
-                        {"bce_num": bce},
-                        {"_id": 0, "bce_num": 0},
-                    )),
-                    "ejustice": list(db["ejustice_publications"].find(
-                        {"bce_num": bce},
-                        {"_id": 0, "bce_num": 0},
-                    )),
-
-                    "enriched_at": datetime.utcnow(),
-                }
-
-                batch.append(UpdateOne(
-                    {"_id": bce},
-                    {"$set": doc},
-                    upsert=True,
-                ))
-                done += 1
-
-            except Exception as exc:
-                log.warning("[silver] [%s] erreur : %s", bce, exc)
-                errors += 1
-
-            # Flush par batch
-            if len(batch) >= BATCH_SIZE:
-                try:
-                    dst.bulk_write(batch, ordered=False)
-                except BulkWriteError:
-                    pass
-                batch.clear()
-
-            if done % BATCH_LOG_EVERY == 0:
-                log.info("[silver] %d/%d entreprises enrichies | %.0f s",
-                         done, total, time.time() - t0)
-
-        # Dernier batch
-        if batch:
-            try:
-                dst.bulk_write(batch, ordered=False)
-            except BulkWriteError:
-                pass
-
-        result = {
-            "total":   done,
-            "errors":  errors,
-            "sec":     round(time.time() - t0, 1),
-        }
-        log.info("=== dag_05 TERMINÉ : %s ===", result)
-        return result
+        sec = round(time.time() - t0, 1)
+        n   = db["enterprises_full"].count_documents({})
+        log.info("=== dag_05 TERMINÉ : %d docs en %.0f s ===", n, sec)
+        return {"total": n, "errors": 0, "sec": sec}
 
     @task
     def report(result: dict) -> None:

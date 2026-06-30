@@ -190,12 +190,12 @@ def _process_deposit(bce, bce_c, deposit_id, year, model_name,
     from ingestion.nbb_api import download_csv, download_pdf
     from ingestion.hdfs_utils import upload_bytes_retry
 
-    # ── CSV ───────────────────────────────────────────────────────────────────
+    # ── CSV (connexion directe — Tor bloqué sur /deposits/consult/csv/) ─────────
     if is_done(bce, "nbb_csv", deposit_id):
         stats["already"] += 1
     else:
         mark_pending(bce, "nbb_csv", deposit_id, year)
-        csv_bytes = download_csv(deposit_id, tor)
+        csv_bytes = download_csv(deposit_id, _pdf_direct_session())
         if csv_bytes:
             hdfs = f"{hdfs_csv_tpl.format(bce=bce_c)}/{deposit_id}.csv"
             try:
