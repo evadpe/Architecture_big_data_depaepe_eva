@@ -1,0 +1,13 @@
+AutomapHostsOnResolve 1
+ControlPort 0.0.0.0:9051
+CookieAuthentication 0
+HashedControlPassword 16:5A5A77FEBFD3F070600B262571C0979C03B1E7C555127F03E24CF39A13
+DNSPort 5353
+DataDirectory /var/lib/tor
+ExitPolicy reject *:*
+Log notice stderr
+RunAsDaemon 0
+SocksPort 0.0.0.0:9050 IsolateDestAddr
+TransPort 0.0.0.0:9040
+User tor
+VirtualAddrNetworkIPv4 10.192.0.0/10

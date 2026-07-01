@@ -178,8 +178,8 @@ services:
     ports:
       - "9050:9050"
       - "9051:9051"
-    environment:
-      - CONTROL_PASSWORD=mypass
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
     networks:
       - bce_network
 
@@ -190,8 +190,8 @@ services:
     ports:
       - "9052:9050"
       - "9053:9051"
-    environment:
-      - CONTROL_PASSWORD=mypass
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
     networks:
       - bce_network
 
@@ -202,8 +202,8 @@ services:
     ports:
       - "9054:9050"
       - "9055:9051"
-    environment:
-      - CONTROL_PASSWORD=mypass
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
     networks:
       - bce_network
 
@@ -214,8 +214,8 @@ services:
     ports:
       - "9056:9050"
       - "9057:9051"
-    environment:
-      - CONTROL_PASSWORD=mypass
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
     networks:
       - bce_network
 
@@ -226,8 +226,8 @@ services:
     ports:
       - "9058:9050"
       - "9059:9051"
-    environment:
-      - CONTROL_PASSWORD=mypass
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
     networks:
       - bce_network
 
@@ -238,8 +238,8 @@ services:
     ports:
       - "9060:9050"
       - "9061:9051"
-    environment:
-      - CONTROL_PASSWORD=mypass
+    volumes:
+      - ./torrc:/etc/tor/torrc:ro
     networks:
       - bce_network
 

@@ -56,7 +56,7 @@ TOR_BACKOFF_BASE     = 5    # secondes de base entre deux retries
 # ── NBB / CBSO ────────────────────────────────────────────────────────────────
 CBSO_API         = "https://consult.cbso.nbb.be/api"
 CBSO_PAGE_SIZE   = 50
-CBSO_DELAY       = 0.8   # 0.8s entre requêtes — équilibre vitesse / rate limit avec rotation Tor
+CBSO_DELAY       = 3.0   # 3s entre requêtes — 4 shards × 6 proxies → ~13 req/min/IP
 CBSO_TIMEOUT_CSV = 60
 CBSO_TIMEOUT_PDF = 90
 

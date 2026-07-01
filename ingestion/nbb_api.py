@@ -49,6 +49,14 @@ def get_deposits(bce_num_clean: str, session: _Session | None = None) -> list[di
                 timeout=15,
             )
             r.raise_for_status()
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                wait = int(exc.response.headers.get("Retry-After", 60))
+                log.warning("[nbb] [%s] 429 — Retry-After %ds", bce_num_clean, wait)
+                time.sleep(wait)
+            else:
+                log.warning("[nbb] [%s] page %d → %s", bce_num_clean, page, exc)
+            break
         except requests.RequestException as exc:
             log.warning("[nbb] [%s] page %d → %s", bce_num_clean, page, exc)
             break
@@ -131,7 +139,9 @@ def download_csv(deposit_id: str, session: _Session | None = None) -> bytes | No
     except requests.RequestException as exc:
         log.warning("[nbb] download_csv [%s] : %s", deposit_id, exc)
         return None
-    if r.status_code == 404:
+    if r.status_code in (404, 500):
+        # 404 = dépôt inexistant, 500 = dépôt sans CSV (PDF-only) — pas de retry
+        log.debug("[nbb] download_csv [%s] HTTP %s — pas de CSV disponible", deposit_id, r.status_code)
         return None
     if not r.ok:
         log.warning("[nbb] download_csv [%s] HTTP %s", deposit_id, r.status_code)

@@ -26,13 +26,14 @@ _LIMIT: int | None = None   # production — toutes les entreprises
 
 PATTERN_CODE = re.compile(r"^\d+(/\d+)?[A-Z]*P?$")
 
-# Shards par premier chiffre du numéro BCE (0-9)
-# → 4 groupes traités en parallèle par 4 tasks Airflow
+# Shards par plage de valeurs _id (BCE formaté "XXXX.XXX.XXX")
+# Distribution réelle : tous en 0... (1.62M) et 1... (330K) → 0 après 2...
+# Bornes calculées pour ~487K entreprises par shard
 _SHARDS = [
-    ["0", "1", "2"],   # shard 0
-    ["3", "4", "5"],   # shard 1
-    ["6", "7"],        # shard 2
-    ["8", "9"],        # shard 3
+    {"min": None,             "max": "0643.895.502"},  # shard 0 : ~487K
+    {"min": "0643.895.502",   "max": "0770.981.536"},  # shard 1 : ~487K
+    {"min": "0770.981.536",   "max": "0865.018.878"},  # shard 2 : ~487K
+    {"min": "0865.018.878",   "max": None},             # shard 3 : ~487K
 ]
 
 
@@ -42,7 +43,7 @@ _SHARDS = [
     schedule="@daily",
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    max_active_runs=2,
+    max_active_runs=1,
     tags=["bce", "nbb", "recent", "bronze", "prioritaire", "layer-1"],
     default_args={"retries": 2, "retry_delay": 300},
 )
@@ -75,34 +76,61 @@ def dag_nbb_recent():
         from ingestion.hdfs_utils import upload_bytes_retry
         from ingestion.tor_session import TorSession
 
-        prefixes = _SHARDS[shard_idx]
-        tag = f"[nbb-s{shard_idx} {'/'.join(prefixes)}]"
+        shard_range = _SHARDS[shard_idx]
+        tag = f"[nbb-s{shard_idx} {shard_range['min'] or '0'}-{shard_range['max'] or 'fin'}]"
 
-        log.info("=== %s démarrage — préfixes BCE: %s ===", tag, prefixes)
+        log.info("=== %s démarrage — plage BCE: %s → %s ===", tag,
+                 shard_range["min"] or "début", shard_range["max"] or "fin")
         t0  = time.time()
         tor = TorSession(headers=NBB_HEADERS)
 
-        # Filtre MongoDB par préfixe du numéro BCE
-        prefix_regex = "^(" + "|".join(prefixes) + ")"
-        query = {"Status": "AC", "bce_num": {"$regex": prefix_regex}}
+        # Reprise : continuer depuis le dernier BCE traité si le task a été interrompu
+        from ingestion.mongo_client import get_state_db
+        state_col = get_state_db()["nbb_shard_cursor"]
+        cursor_doc = state_col.find_one({"_id": f"shard_{shard_idx}"})
+        last_bce = cursor_doc["last_bce"] if cursor_doc else None
+
+        # ── Filtre MongoDB sur _id (indexé) ──────────────────────────────────────
+        id_filter: dict = {}
+        if last_bce:
+            id_filter["$gt"] = last_bce
+            log.info("%s reprise depuis BCE > %s", tag, last_bce)
+        elif shard_range["min"] is not None:
+            id_filter["$gte"] = shard_range["min"]
+        if shard_range["max"] is not None:
+            id_filter["$lt"] = shard_range["max"]
+
+        query = {"Status": "AC"}
+        if id_filter:
+            query["_id"] = id_filter
+
         n_shard = col(COL_ENTERPRISES).count_documents(query)
         log.info("%s %d entreprises dans ce shard", tag, n_shard)
 
         stats = dict(companies=0, no_deposits=0, already=0,
                      csv_ok=0, csv_fail=0, pdf_ok=0, pdf_fail=0, errors=0)
         limit = _LIMIT
+        last_processed_bce = last_bce
 
-        for company in col(COL_ENTERPRISES).find(query, batch_size=500):
+        for company in col(COL_ENTERPRISES).find(query, no_cursor_timeout=True).sort("_id", 1):
             if limit is not None and stats["companies"] >= limit:
                 break
 
-            bce   = company["bce_num"]
-            bce_c = company.get("bce_num_clean", bce.replace(".", ""))
+            bce   = company["_id"]   # _id == bce_num
+            bce_c = bce.replace(".", "")
+            last_processed_bce = bce
             stats["companies"] += 1
 
             if stats["companies"] % BATCH_LOG_EVERY == 0:
                 _log_progress(tag, stats, n_shard, t0)
+                # Sauvegarde du curseur tous les 1000 pour reprise en cas de crash
+                state_col.update_one(
+                    {"_id": f"shard_{shard_idx}"},
+                    {"$set": {"last_bce": last_processed_bce, "companies_done": stats["companies"]}},
+                    upsert=True,
+                )
 
+            time.sleep(CBSO_DELAY)   # délai avant chaque appel listing (avec ou sans dépôt)
             try:
                 deposits = list(iter_deposits_to_ingest(
                     bce_c, session=tor,
@@ -126,6 +154,15 @@ def dag_nbb_recent():
                     hdfs_pdf_tpl=HDFS_BRONZE_NBB_PDFS,
                 )
                 time.sleep(CBSO_DELAY)
+
+        # Sauvegarder le curseur pour reprendre au prochain run
+        if last_processed_bce:
+            state_col.update_one(
+                {"_id": f"shard_{shard_idx}"},
+                {"$set": {"last_bce": last_processed_bce, "companies_done": stats["companies"]}},
+                upsert=True,
+            )
+            log.info("%s curseur sauvegardé : last_bce=%s", tag, last_processed_bce)
 
         _log_progress(f"{tag} FINAL", stats, n_shard, t0)
         stats["shard"] = shard_idx
@@ -207,7 +244,8 @@ def _process_deposit(bce, bce_c, deposit_id, year, model_name,
                 mark_error(bce, "nbb_csv", deposit_id, str(exc))
                 stats["csv_fail"] += 1
         else:
-            mark_error(bce, "nbb_csv", deposit_id, "no_content")
+            # Pas de CSV (dépôt PDF-only) — on marque done pour ne pas retenter
+            mark_done(bce, "nbb_csv", deposit_id, "no_csv", 0)
             stats["csv_fail"] += 1
 
     # ── PDF (connexion directe — Tor bloqué sur /deposits/pdf/) ───────────────
