@@ -26,15 +26,20 @@ _LIMIT: int | None = None   # production — toutes les entreprises
 
 PATTERN_CODE = re.compile(r"^\d+(/\d+)?[A-Z]*P?$")
 
-# Shards par plage de valeurs _id (BCE formaté "XXXX.XXX.XXX")
-# Distribution réelle : tous en 0... (1.62M) et 1... (330K) → 0 après 2...
-# Bornes calculées pour ~487K entreprises par shard
-_SHARDS = [
-    {"min": None,             "max": "0643.895.502"},  # shard 0 : ~487K
-    {"min": "0643.895.502",   "max": "0770.981.536"},  # shard 1 : ~487K
-    {"min": "0770.981.536",   "max": "0865.018.878"},  # shard 2 : ~487K
-    {"min": "0865.018.878",   "max": None},             # shard 3 : ~487K
-]
+N_SHARDS = 4   # tâches Airflow parallèles
+
+# NACE codes hôtellerie retenus (activité MAIN uniquement)
+NACE_HEBERGEMENT = {"55100", "55201", "55202", "55203", "55204", "55209",
+                    "55300", "55400", "55900"}
+
+# Formes juridiques exclues (secteur public)
+EXCLUDED_FORMS = {
+    "110", "114", "116", "117",                                          # entités publiques
+    "301", "302", "303",                                                  # services fédéraux
+    "310", "320", "330", "340", "350",                                    # autorités régionales
+    "400", "411", "412", "413", "414", "415",                            # communes / CPAS
+    "416", "417", "418", "419", "420",                                    # intercommunales
+}
 
 
 @dag(
@@ -62,7 +67,7 @@ def dag_nbb_recent():
     def ingest_shard(shard_idx: int, n_companies: int) -> dict:
         """Traite un shard (sous-ensemble de préfixes BCE) en parallèle des autres."""
         from ingestion.config import (
-            HDFS_BRONZE_NBB_CSVS, HDFS_BRONZE_NBB_PDFS,
+            HDFS_SILVER_NBB_CSVS, HDFS_SILVER_NBB_PDFS,
             BATCH_LOG_EVERY, CBSO_DELAY,
             ANNEE_MIN_RECENT, ANNEE_MAX_RECENT,
             NBB_HEADERS,
@@ -76,59 +81,80 @@ def dag_nbb_recent():
         from ingestion.hdfs_utils import upload_bytes_retry
         from ingestion.tor_session import TorSession
 
-        shard_range = _SHARDS[shard_idx]
-        tag = f"[nbb-s{shard_idx} {shard_range['min'] or '0'}-{shard_range['max'] or 'fin'}]"
+        import socket
+        socket.setdefaulttimeout(20)   # timeout global — évite le gel PySocks/SOCKS5
 
-        log.info("=== %s démarrage — plage BCE: %s → %s ===", tag,
-                 shard_range["min"] or "début", shard_range["max"] or "fin")
+        tag = f"[nbb-s{shard_idx}]"
+        log.info("=== %s démarrage — hébergements NACE 55.xx (sans formes sociales) ===", tag)
         t0  = time.time()
         tor = TorSession(headers=NBB_HEADERS)
 
-        # Reprise : continuer depuis le dernier BCE traité si le task a été interrompu
-        from ingestion.mongo_client import get_state_db
+        from ingestion.mongo_client import get_state_db, get_db
+        db_ref    = get_db()
         state_col = get_state_db()["nbb_shard_cursor"]
         cursor_doc = state_col.find_one({"_id": f"shard_{shard_idx}"})
+
+        # Reset curseur si scope précédent ≠ hébergement
+        if cursor_doc and cursor_doc.get("scope") != "hebergement":
+            state_col.delete_one({"_id": f"shard_{shard_idx}"})
+            cursor_doc = None
         last_bce = cursor_doc["last_bce"] if cursor_doc else None
 
-        # ── Filtre MongoDB sur _id (indexé) ──────────────────────────────────────
-        id_filter: dict = {}
+        # ── Liste cible : hôtellerie NACE MAIN, personne morale privée, hors public ─
+        all_heberg = set(
+            db_ref["kbo_activities"].distinct(
+                "entity_number",
+                {"nace_code": {"$in": list(NACE_HEBERGEMENT)}, "classification": "MAIN"},
+            )
+        )
+        heberg_ids = sorted(
+            doc["_id"]
+            for doc in db_ref["kbo_enterprises"].find(
+                {
+                    "_id":              {"$in": list(all_heberg)},
+                    "Status":           "AC",
+                    "TypeOfEnterprise": "2",                        # personne morale privée
+                    "JuridicalForm":    {"$nin": list(EXCLUDED_FORMS)},
+                },
+                {"_id": 1},
+            )
+        )
+
+        # ── Chunk de ce shard ─────────────────────────────────────────────────────
+        n_total    = len(heberg_ids)
+        chunk_size = (n_total + N_SHARDS - 1) // N_SHARDS
+        shard_ids  = heberg_ids[shard_idx * chunk_size : (shard_idx + 1) * chunk_size]
         if last_bce:
-            id_filter["$gt"] = last_bce
+            shard_ids = [eid for eid in shard_ids if eid > last_bce]
             log.info("%s reprise depuis BCE > %s", tag, last_bce)
-        elif shard_range["min"] is not None:
-            id_filter["$gte"] = shard_range["min"]
-        if shard_range["max"] is not None:
-            id_filter["$lt"] = shard_range["max"]
 
-        query = {"Status": "AC"}
-        if id_filter:
-            query["_id"] = id_filter
-
-        n_shard = col(COL_ENTERPRISES).count_documents(query)
-        log.info("%s %d entreprises dans ce shard", tag, n_shard)
+        n_shard = len(shard_ids)
+        log.info("%s %d entreprises hébergement (shard %d/%d, total=%d)",
+                 tag, n_shard, shard_idx + 1, N_SHARDS, n_total)
 
         stats = dict(companies=0, no_deposits=0, already=0,
                      csv_ok=0, csv_fail=0, pdf_ok=0, pdf_fail=0, errors=0)
         limit = _LIMIT
         last_processed_bce = last_bce
 
-        for company in col(COL_ENTERPRISES).find(query, no_cursor_timeout=True).sort("_id", 1):
+        for bce in shard_ids:
             if limit is not None and stats["companies"] >= limit:
                 break
 
-            bce   = company["_id"]   # _id == bce_num
             bce_c = bce.replace(".", "")
             last_processed_bce = bce
             stats["companies"] += 1
 
-            if stats["companies"] % BATCH_LOG_EVERY == 0:
-                _log_progress(tag, stats, n_shard, t0)
-                # Sauvegarde du curseur tous les 1000 pour reprise en cas de crash
+            if stats["companies"] % 100 == 0:
+                # Sauvegarde du curseur tous les 100 pour reprise rapide en cas de crash
                 state_col.update_one(
                     {"_id": f"shard_{shard_idx}"},
-                    {"$set": {"last_bce": last_processed_bce, "companies_done": stats["companies"]}},
+                    {"$set": {"last_bce": last_processed_bce, "companies_done": stats["companies"],
+                              "scope": "hebergement"}},
                     upsert=True,
                 )
+            if stats["companies"] % BATCH_LOG_EVERY == 0:
+                _log_progress(tag, stats, n_shard, t0)
 
             time.sleep(CBSO_DELAY)   # délai avant chaque appel listing (avec ou sans dépôt)
             try:
@@ -150,8 +176,8 @@ def dag_nbb_recent():
                 _process_deposit(
                     bce, bce_c, deposit_id, year, model_name,
                     tor, stats,
-                    hdfs_csv_tpl=HDFS_BRONZE_NBB_CSVS,
-                    hdfs_pdf_tpl=HDFS_BRONZE_NBB_PDFS,
+                    hdfs_csv_tpl=HDFS_SILVER_NBB_CSVS,
+                    hdfs_pdf_tpl=HDFS_SILVER_NBB_PDFS,
                 )
                 time.sleep(CBSO_DELAY)
 
@@ -198,7 +224,7 @@ def dag_nbb_recent():
     n = check_ready()
 
     shard_results = [ingest_shard.override(task_id=f"ingest_shard_{i}")(i, n)
-                     for i in range(len(_SHARDS))]
+                     for i in range(N_SHARDS)]
 
     report(shard_results)
 
@@ -227,12 +253,12 @@ def _process_deposit(bce, bce_c, deposit_id, year, model_name,
     from ingestion.nbb_api import download_csv, download_pdf
     from ingestion.hdfs_utils import upload_bytes_retry
 
-    # ── CSV (connexion directe — Tor bloqué sur /deposits/consult/csv/) ─────────
+    # ── CSV via TorSession (rotation IP anti-429) ────────────────────────────────
     if is_done(bce, "nbb_csv", deposit_id):
         stats["already"] += 1
     else:
         mark_pending(bce, "nbb_csv", deposit_id, year)
-        csv_bytes = download_csv(deposit_id, _pdf_direct_session())
+        csv_bytes = download_csv(deposit_id, tor)
         if csv_bytes:
             hdfs = f"{hdfs_csv_tpl.format(bce=bce_c)}/{deposit_id}.csv"
             try:
@@ -248,15 +274,14 @@ def _process_deposit(bce, bce_c, deposit_id, year, model_name,
             mark_done(bce, "nbb_csv", deposit_id, "no_csv", 0)
             stats["csv_fail"] += 1
 
-    # ── PDF (connexion directe — Tor bloqué sur /deposits/pdf/) ───────────────
-    from ingestion.config import ENABLE_NBB_PDF, PDF_USE_TOR
+    # ── PDF via TorSession (rotation IP anti-429) ────────────────────────────────
+    from ingestion.config import ENABLE_NBB_PDF
     if ENABLE_NBB_PDF:
         if is_done(bce, "nbb_pdf", deposit_id):
             stats["already"] += 1
         else:
             mark_pending(bce, "nbb_pdf", deposit_id, year)
-            pdf_session = tor if PDF_USE_TOR else _pdf_direct_session()
-            pdf_bytes = download_pdf(deposit_id, pdf_session)
+            pdf_bytes = download_pdf(deposit_id, tor)
             if pdf_bytes:
                 hdfs = f"{hdfs_pdf_tpl.format(bce=bce_c)}/{deposit_id}.pdf"
                 try:

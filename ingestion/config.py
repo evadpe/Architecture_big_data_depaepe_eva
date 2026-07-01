@@ -31,6 +31,8 @@ HDFS_USER = os.getenv("HDFS_USER", "root")
 
 HDFS_BRONZE_NBB_CSVS = "/bronze/nbb/csvs/{bce}"
 HDFS_BRONZE_NBB_PDFS = "/bronze/nbb/pdfs/{bce}"
+HDFS_SILVER_NBB_CSVS = "/silver/nbb/hebergement/csvs/{bce}"
+HDFS_SILVER_NBB_PDFS = "/silver/nbb/hebergement/pdfs/{bce}"
 HDFS_BRONZE_STRAPOR  = "/bronze/strapor/{bce}"
 HDFS_BRONZE_EJUSTICE = "/bronze/ejustice/{bce}"
 
@@ -56,7 +58,7 @@ TOR_BACKOFF_BASE     = 5    # secondes de base entre deux retries
 # ── NBB / CBSO ────────────────────────────────────────────────────────────────
 CBSO_API         = "https://consult.cbso.nbb.be/api"
 CBSO_PAGE_SIZE   = 50
-CBSO_DELAY       = 3.0   # 3s entre requêtes — 4 shards × 6 proxies → ~13 req/min/IP
+CBSO_DELAY       = 2.0   # 2s entre requêtes — 4 shards × 6 proxies → ~20 req/min/IP
 CBSO_TIMEOUT_CSV = 60
 CBSO_TIMEOUT_PDF = 90
 
@@ -91,7 +93,7 @@ STRAPOR_NO_NOTAIRE   = {"009", "017", "018", "025", "026", "027", "051", "052"}
 
 # ── Fenêtres fiscales NBB ────────────────────────────────────────────────────
 # DAG prioritaire  : 2020 → 2025  (5 dernières années, à finir en ~3 jours)
-ANNEE_MIN_RECENT  = 2020
+ANNEE_MIN_RECENT  = 2021
 ANNEE_MAX_RECENT  = 2025
 # DAG non-prioritaire : tout ce qui est < 2020  (aucune borne inférieure)
 ANNEE_MAX_HISTORIC = 2019   # inclus ; pas de borne basse (on prend tout)
