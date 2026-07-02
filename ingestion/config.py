@@ -33,8 +33,10 @@ HDFS_BRONZE_NBB_CSVS = "/bronze/nbb/csvs/{bce}"
 HDFS_BRONZE_NBB_PDFS = "/bronze/nbb/pdfs/{bce}"
 HDFS_SILVER_NBB_CSVS = "/silver/nbb/hebergement/csvs/{bce}"
 HDFS_SILVER_NBB_PDFS = "/silver/nbb/hebergement/pdfs/{bce}"
-HDFS_BRONZE_STRAPOR  = "/bronze/strapor/{bce}"
-HDFS_BRONZE_EJUSTICE = "/bronze/ejustice/{bce}"
+HDFS_BRONZE_STRAPOR          = "/bronze/strapor/{bce}"
+HDFS_BRONZE_EJUSTICE         = "/bronze/ejustice/{bce}"
+HDFS_SILVER_STRAPOR_HEBERG   = "/silver/strapor/hebergement/{bce}"
+HDFS_SILVER_EJUSTICE_HEBERG  = "/silver/ejustice/hebergement/{bce}"
 
 # ── KBO CSV local ─────────────────────────────────────────────────────────────
 KBO_DATA_DIR   = os.getenv("KBO_DATA_DIR", "/opt/airflow/données")
@@ -58,13 +60,13 @@ TOR_BACKOFF_BASE     = 5    # secondes de base entre deux retries
 # ── NBB / CBSO ────────────────────────────────────────────────────────────────
 CBSO_API         = "https://consult.cbso.nbb.be/api"
 CBSO_PAGE_SIZE   = 50
-CBSO_DELAY       = 2.0   # 2s entre requêtes — 4 shards × 6 proxies → ~20 req/min/IP
+CBSO_DELAY       = 1.0   # 1s entre requêtes — 4 shards × 6 proxies → ~40 req/min/IP
 CBSO_TIMEOUT_CSV = 60
 CBSO_TIMEOUT_PDF = 90
 
 # PDFs accessibles publiquement MAIS l'endpoint /deposits/pdf/ bloque les Tor exit nodes.
 # → CSVs via Tor (anti-429), PDFs via connexion directe (Origin/Referer suffisent).
-ENABLE_NBB_PDF     = True
+ENABLE_NBB_PDF     = False  # NBB PDF servers en erreur 500/502 — réactiver quand stable
 PDF_USE_TOR        = False   # False = connexion directe pour les PDFs
 
 NBB_HEADERS = {

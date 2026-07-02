@@ -45,13 +45,15 @@ def get_publications(bce_num_clean: str, session: _Session | None = None) -> lis
     log.debug("[ejustice] get_publications [%s]", bce_num_clean)
     sess = session or _get_default()
 
+    # eJustice attend le numéro BCE sans zéro(s) initial/initiaux
+    btw = bce_num_clean.lstrip("0") or "0"
     try:
         r = sess.get(
             EJUSTICE_URL,
             params={
                 "language":   "fr",
-                "btw_search": bce_num_clean,
-                "btw":        bce_num_clean,
+                "btw_search": btw,
+                "btw":        btw,
                 "page":       1,
                 "la_search":  "f",
                 "caller":     "list",

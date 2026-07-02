@@ -40,6 +40,8 @@ x-airflow-common: &airflow-common
       requests==2.32.3
       pandas==2.2.2
       PySocks==1.7.1
+      playwright==1.44.0
+    PLAYWRIGHT_BROWSERS_PATH: /opt/airflow/pw-browsers
   volumes:
     - ./dags:/opt/airflow/dags
     - ./ingestion:/opt/airflow/ingestion

@@ -42,34 +42,44 @@ _SEED_BCE = "0836157420"
 
 def _fetch_cookies_via_playwright() -> list[dict]:
     """
-    Ouvre Chrome (visible ~3 s) pour obtenir les cookies anti-bot F5.
-    Requiert Playwright + Chrome installés sur la machine hôte.
-    Dans un conteneur Airflow headless, monter notaire_cookies.json manuellement.
+    Lance Chromium (headless avec anti-détection) pour obtenir les cookies anti-bot F5.
+    Fonctionne dans un container Docker sans display.
     """
+    import os
     from playwright.sync_api import sync_playwright
 
     seed_url = (
         f"{STRAPOR_BASE}/enterprise/{_SEED_BCE}/statutes"
         f"?enterpriseNumber={_SEED_BCE}&statuteStart=0&statuteCount=5"
     )
-    log.info("[strapor] Ouverture Chrome pour renouveler les cookies F5…")
+    log.info("[strapor] Lancement Chromium headless pour renouveler les cookies F5…")
+
+    # Headless si pas de display (Docker), visible sinon (dev local)
+    headless = not bool(os.environ.get("DISPLAY"))
 
     with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(channel="chrome", headless=False)
-        except Exception:
-            log.warning("[strapor] Chrome introuvable — fallback Chromium")
-            browser = p.chromium.launch(headless=False)
-
+        browser = p.chromium.launch(
+            headless=headless,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+            ],
+        )
         ctx = browser.new_context(
             locale="fr-BE",
             user_agent=HEADERS_API["User-Agent"],
+            viewport={"width": 1280, "height": 800},
         )
-        page = ctx.new_page()
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        # Masquer les traces headless
+        ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            "Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});"
+            "Object.defineProperty(navigator, 'languages', {get: () => ['fr-BE','fr']});"
         )
 
+        page = ctx.new_page()
         page.goto("https://statuts.notaire.be/", wait_until="load", timeout=20_000)
         page.wait_for_timeout(2_000)
         page.goto(seed_url, wait_until="load", timeout=30_000)
