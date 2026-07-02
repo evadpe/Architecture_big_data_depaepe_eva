@@ -11,7 +11,7 @@ version: '3.8'
 # ─────────────────────────────────────────────────────────────────────────────
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.3
+  build: ./airflow-docker          # image custom : Airflow 2.9.3 + Java 17
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -25,15 +25,20 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '4' # max 4 tasks par DAG
     PYTHONPATH: /opt/airflow
     # ── Connexions pipeline ──────────────────────────────────────────────────
-    MONGO_URI:           mongodb://mongo:27017/
-    MONGO_DB:            bce_db
-    MONGO_STATE_URI:     mongodb://mongo_state:27017/
-    MONGO_STATE_DB:      bce_state_db
-    HDFS_URL:            http://namenode:9870
-    HDFS_USER:           root
-    KBO_DATA_DIR:        /opt/airflow/données
-    STRAPOR_COOKIE_FILE: /opt/airflow/notaire_cookies.json
+    MONGO_URI:            mongodb://mongo:27017/
+    MONGO_DB:             bce_db
+    MONGO_STATE_URI:      mongodb://mongo_state:27017/
+    MONGO_STATE_DB:       bce_state_db
+    HDFS_URL:             http://namenode:9870
+    HDFS_USER:            root
+    KBO_DATA_DIR:         /opt/airflow/données
+    STRAPOR_COOKIE_FILE:  /opt/airflow/notaire_cookies.json
     TOR_CONTROL_PASSWORD: mypass
+    # ── Spark ────────────────────────────────────────────────────────────────
+    SPARK_MASTER_URL:        spark://spark-master:7077
+    JAVA_HOME:               /usr/lib/jvm/java-17-openjdk-amd64
+    PYSPARK_PYTHON:          python3
+    PYSPARK_DRIVER_PYTHON:   python3
     # ── Packages supplémentaires ──────────────────────────────────────────────
     _PIP_ADDITIONAL_REQUIREMENTS: >-
       pymongo==4.7.3
@@ -41,10 +46,12 @@ x-airflow-common: &airflow-common
       pandas==2.2.2
       PySocks==1.7.1
       playwright==1.44.0
+      pyspark==3.5.3
     PLAYWRIGHT_BROWSERS_PATH: /opt/airflow/pw-browsers
   volumes:
     - ./dags:/opt/airflow/dags
     - ./ingestion:/opt/airflow/ingestion
+    - ./spark_jobs:/opt/airflow/spark_jobs
     - ./données:/opt/airflow/données:ro
     - ./logs:/opt/airflow/logs
     - ./notaire_cookies.json:/opt/airflow/notaire_cookies.json
@@ -308,6 +315,90 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+
+  # ── Spark Master ──────────────────────────────────────────────────────────
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: spark_master
+    hostname: spark-master
+    restart: always
+    user: root
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      PYSPARK_PYTHON: python3
+    ports:
+      - "7077:7077"
+      - "8090:8080"     # UI Spark (évite conflit avec Airflow 8080)
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+    networks:
+      - bce_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/ || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── Spark Worker ───────────────────────────────────────────────────────────
+  spark-worker:
+    image: apache/spark:3.5.3
+    container_name: spark_worker
+    hostname: spark-worker
+    restart: always
+    user: root
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: "2"
+      PYSPARK_PYTHON: python3
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+    networks:
+      - bce_network
+    depends_on:
+      spark-master:
+        condition: service_healthy
+
+  # ── API FastAPI ────────────────────────────────────────────────────────────
+  api:
+    build: ./api
+    container_name: bce_api
+    hostname: api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017/
+      MONGO_DB:  bce_db
+      PYTHONPATH: /app
+    volumes:
+      - ./api:/app
+      - ./ingestion:/app/ingestion
+      - ./notaire_cookies.json:/app/notaire_cookies.json
+    networks:
+      - bce_network
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  # ── Frontend React (Vite dev server) ──────────────────────────────────────
+  frontend:
+    image: node:20-alpine
+    container_name: bce_frontend
+    hostname: frontend
+    restart: always
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev"
+    networks:
+      - bce_network
+    depends_on:
+      - api
 
 volumes:
   namenode_data:

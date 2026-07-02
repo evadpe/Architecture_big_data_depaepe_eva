@@ -1,0 +1,5 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pymongo==4.7.3
+requests==2.32.3
+PySocks==1.7.1
